@@ -25,8 +25,8 @@ from scipy.stats import pearsonr, spearmanr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from text_processing_v2 import (
-    extract_push_contents_with_tags, segment_with_jieba_v2,
+from text_processing import (
+    extract_push_contents_with_tags, segment_with_jieba,
     load_stopwords, filter_tokens,
 )
 from config import PICKLE_AFTER_PATH, PICKLE_DURING_PATH
@@ -147,7 +147,7 @@ def evaluate_dictionary(push_data, dict_df, threshold=0.0, stopwords=None,
             continue
         true_label = TAG_MAP[tag_str]
 
-        words = list(segment_with_jieba_v2([item['content']])[0])
+        words = list(segment_with_jieba([item['content']])[0])
         score = score_comment(words, sentiment_dict, stopwords)
         if score is None:
             continue

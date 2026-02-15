@@ -18,7 +18,6 @@ data/comments/raw/
 
 # Large intermediate outputs
 output/segmented_sentences.json
-output/v2/segmented_sentences_v2.json
 
 # NLP models (2.5GB CKIPTagger)
 data/nlp_models/

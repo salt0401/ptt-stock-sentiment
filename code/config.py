@@ -1,8 +1,4 @@
-"""Centralized path configuration for the NLP project.
-
-Replaces all hardcoded Google Colab /content/drive/MyDrive/... paths
-with configurable local paths relative to the project root.
-"""
+"""Centralized path configuration for the NLP project."""
 
 from pathlib import Path
 
@@ -25,23 +21,15 @@ CSENTI_DIR = EXTERNAL_DIR / "csenti_package"
 
 # --- Specific files ---
 OPINION_DICT_PATH = OUTPUT_DIR / "opinion_dict.xlsx"
-POSITIVE_DICT_PATH = OUTPUT_DIR / "positive_dict.xlsx"
-NO_SCORE_DICT_PATH = OUTPUT_DIR / "computed_sentiment_dict.csv"
 
 # Financial data
 STOCK_PRICE_DIR = FINANCIAL_DIR  # monthly CSV files like 2018-1.csv
-ROE_DATA_PATH = FINANCIAL_DIR / "market_daily_price.csv"  # placeholder — actual ROE.csv
+ROE_DATA_PATH = FINANCIAL_DIR / "market_daily_price.csv"
 ASSET_DATA_PATH = FINANCIAL_DIR  # total_assets.csv
 
 # Pickle files (scraped data)
 PICKLE_AFTER_PATH = COMMENTS_RAW_DIR / "after_market.pkl"
 PICKLE_DURING_PATH = COMMENTS_RAW_DIR / "during_market.pkl"
-
-# Word2Vec / vectorization outputs
-VECTORS_PATH = OUTPUT_DIR / "w2v_vectors.npy"
-DISTANCES_PATH = OUTPUT_DIR / "minkowski_distances.npy"
-WEIGHTED_DISTANCES_PATH = OUTPUT_DIR / "weighted_distances.npy"
-SEGMENTED_JSON_PATH = OUTPUT_DIR / "segmented_sentences.json"
 
 # Fama-French output
 FAMA_FRENCH_OUTPUT_DIR = FINANCIAL_DIR / "fama-french"

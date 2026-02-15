@@ -1,59 +1,168 @@
-"""Text processing utilities — extracted from multiple notebooks.
+"""Text processing utilities for PTT sentiment analysis.
 
-Provides functions for:
-- Push/comment content extraction and URL filtering
-- Jieba word segmentation
-- Word frequency counting
-- Post title filtering
-- Author-level spam filtering
-- Log-weighted word frequency
+Features:
+- File-based stopword loading (~300 words)
+- Custom jieba dictionary for PTT stock compound terms
+- Push tag extraction (Tag + Userid + Ipdatetime alongside Content)
+- Token filtering: removes single chars, pure numbers, len<2
+- Frequency counting with expanded stopword set
+- Post title filtering for scraper integration
 """
 
 import re
-import math
 import string
+from pathlib import Path
 
 import jieba
 import pandas as pd
 
+from config import DATA_DIR
+
 
 # ---------------------------------------------------------------------------
-# Push content extraction (from FinalSentimentScore cells 6, 15)
+# Paths
 # ---------------------------------------------------------------------------
 
-def extract_push_contents(pushes):
-    """Extract Content field from push dicts, filtering out URLs.
+STOPWORDS_DIR = DATA_DIR / "stopwords"
+STOPWORDS_PATH = STOPWORDS_DIR / "ptt_stopwords.txt"
+CUSTOM_DICT_PATH = STOPWORDS_DIR / "ptt_custom_dict.txt"
+
+
+# ---------------------------------------------------------------------------
+# Stopword loading
+# ---------------------------------------------------------------------------
+
+def load_stopwords(path=None):
+    """Load stopwords from a text file (one word per line, # for comments).
+
+    Parameters
+    ----------
+    path : str or Path, optional
+        Path to stopword file. Defaults to STOPWORDS_PATH.
+
+    Returns
+    -------
+    set[str] : Set of stopwords.
+    """
+    if path is None:
+        path = STOPWORDS_PATH
+    path = Path(path)
+    if not path.exists():
+        print(f"  [WARN] Stopword file not found: {path}, using empty set")
+        return set()
+
+    words = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                words.add(line)
+    return words
+
+
+# ---------------------------------------------------------------------------
+# Jieba custom dictionary
+# ---------------------------------------------------------------------------
+
+_jieba_custom_loaded = False
+
+
+def init_jieba_custom_dict(path=None):
+    """Load custom jieba dictionary for PTT stock terms.
+
+    Safe to call multiple times; only loads once.
+
+    Parameters
+    ----------
+    path : str or Path, optional
+        Path to jieba user dictionary. Defaults to CUSTOM_DICT_PATH.
+    """
+    global _jieba_custom_loaded
+    if _jieba_custom_loaded:
+        return
+    if path is None:
+        path = CUSTOM_DICT_PATH
+    path = Path(path)
+    if path.exists():
+        jieba.load_userdict(str(path))
+        print(f"  Loaded custom jieba dictionary: {path}")
+    else:
+        print(f"  [WARN] Custom dict not found: {path}")
+    _jieba_custom_loaded = True
+
+
+# ---------------------------------------------------------------------------
+# Push content extraction with tags
+# ---------------------------------------------------------------------------
+
+_URL_PATTERN = re.compile(
+    r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+)
+
+
+def extract_push_contents_with_tags(pushes):
+    """Extract push Content along with Tag, Userid, and Ipdatetime.
+
+    Filters out pushes whose content is a URL.
 
     Parameters
     ----------
     pushes : list[dict]
-        List of push dictionaries with 'Content' key.
+        Push dicts with keys: Tag, Userid, Content, Ipdatetime.
 
     Returns
     -------
-    list[str] : Cleaned push content strings.
+    list[dict] : Each dict has keys: tag, userid, content, ipdatetime.
+        tag values: '推' (push/positive), '噓' (boo/negative), '→' (neutral arrow).
     """
-    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    contents = [
-        item['Content']
-        for item in pushes
-        if 'Content' in item and not re.search(url_pattern, item['Content'])
-    ]
-    return contents
+    results = []
+    for item in pushes:
+        content = item.get("Content", "")
+        if not content or _URL_PATTERN.search(content):
+            continue
+        results.append({
+            "tag": item.get("Tag", "→").strip(),
+            "userid": item.get("Userid", ""),
+            "content": content,
+            "ipdatetime": item.get("Ipdatetime", ""),
+        })
+    return results
 
+
+def extract_push_contents(pushes):
+    """Extract only Content field from pushes, filtering URLs (v1 compatible).
+
+    Parameters
+    ----------
+    pushes : list[dict]
+
+    Returns
+    -------
+    list[str] : Cleaned content strings.
+    """
+    return [
+        item["content"]
+        for item in extract_push_contents_with_tags(pushes)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Segmentation
+# ---------------------------------------------------------------------------
 
 def segment_with_jieba(sentences):
-    """Segment a list of sentences using jieba.
+    """Segment sentences using jieba with custom dictionary loaded.
 
     Parameters
     ----------
     sentences : list[str]
-        Raw sentences to segment.
+        Raw sentences.
 
     Returns
     -------
-    list[list[str]] : Each sentence as a list of segmented words.
+    list[list[str]] : Segmented sentences.
     """
+    init_jieba_custom_dict()
     segmented = []
     for sentence in sentences:
         words = list(jieba.cut(sentence))
@@ -61,43 +170,90 @@ def segment_with_jieba(sentences):
     return segmented
 
 
-DEFAULT_EXCLUDED_WORDS = [
-    '我', '你', ',', '！', '，', '了', '又', '？',
-    '的', '是', '就', '要', '在', '都', '有', '嗎', '也', '會',
-]
+# ---------------------------------------------------------------------------
+# Token filtering
+# ---------------------------------------------------------------------------
+
+_PURE_NUMBER_RE = re.compile(r'^[\d.,%+\-]+$')
+_PURE_PUNCT_RE = re.compile(r'^[' + re.escape(string.punctuation) + r'。，！？、；：「」『』（）【】《》〈〉""''…─—～]+$')
 
 
-def build_word_frequency(segmented_sentences, excluded_words=None):
-    """Count word frequencies from segmented sentences, excluding stopwords.
+def filter_tokens(tokens, stopwords=None, min_len=2):
+    """Filter a list of tokens, removing noise.
+
+    Removes:
+    - Tokens in stopwords set
+    - Pure punctuation
+    - Pure numbers (including decimals, percentages)
+    - Tokens shorter than min_len
+    - Whitespace-only tokens
+
+    Parameters
+    ----------
+    tokens : list[str]
+        Word tokens from segmentation.
+    stopwords : set[str], optional
+        Stopwords to remove.
+    min_len : int
+        Minimum token length (in characters).
+
+    Returns
+    -------
+    list[str] : Filtered tokens.
+    """
+    if stopwords is None:
+        stopwords = set()
+
+    filtered = []
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+        if len(tok) < min_len:
+            continue
+        if tok in stopwords:
+            continue
+        if _PURE_NUMBER_RE.match(tok):
+            continue
+        if _PURE_PUNCT_RE.match(tok):
+            continue
+        filtered.append(tok)
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Word frequency (v2)
+# ---------------------------------------------------------------------------
+
+def build_word_frequency(segmented_sentences, stopwords=None, min_len=2):
+    """Count word frequencies with expanded stopword filtering.
 
     Parameters
     ----------
     segmented_sentences : list[list[str]]
         2D list of segmented words.
-    excluded_words : list[str], optional
-        Words to exclude. Defaults to DEFAULT_EXCLUDED_WORDS.
+    stopwords : set[str], optional
+        Stopwords set. If None, loads from default file.
+    min_len : int
+        Minimum token length.
 
     Returns
     -------
     dict : {word: count}, sorted by count descending.
     """
-    if excluded_words is None:
-        excluded_words = DEFAULT_EXCLUDED_WORDS
+    if stopwords is None:
+        stopwords = load_stopwords()
 
-    word_count_dict = {}
-    for sublist in segmented_sentences:
-        for word in sublist:
-            word_cleaned = word.strip()
-            if word_cleaned and word_cleaned not in string.punctuation and word_cleaned not in excluded_words:
-                word_count_dict[word_cleaned] = word_count_dict.get(word_cleaned, 0) + 1
+    word_count = {}
+    for sentence in segmented_sentences:
+        for tok in filter_tokens(sentence, stopwords, min_len):
+            word_count[tok] = word_count.get(tok, 0) + 1
 
-    # Sort by count descending
-    sorted_word_count = dict(sorted(word_count_dict.items(), key=lambda x: x[1], reverse=True))
-    return sorted_word_count
+    return dict(sorted(word_count.items(), key=lambda x: x[1], reverse=True))
 
 
 # ---------------------------------------------------------------------------
-# Post title filtering (from PttStock_v2 cell 9)
+# Post title filtering (used by scraper)
 # ---------------------------------------------------------------------------
 
 def filter_posts_by_title(df, include_words=None, exclude_words=None):
@@ -123,68 +279,3 @@ def filter_posts_by_title(df, include_words=None, exclude_words=None):
         for word in include_words:
             result = result[result['Title'].str.contains(word)]
     return result.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Author-level spam filtering (from 留言處理(取log) cells 0, 2)
-# ---------------------------------------------------------------------------
-
-def filter_comments_by_author(comments, threshold_ratio=0.01, min_threshold=2):
-    """Cap per-author comment count to prevent spam dominance.
-
-    If total comments >= 1/threshold_ratio, the cap is
-    total_comments * threshold_ratio. Otherwise uses min_threshold.
-
-    Parameters
-    ----------
-    comments : list[dict]
-        Each dict must have an 'author' (or 'Userid') key.
-    threshold_ratio : float
-        Maximum fraction of total comments per author.
-    min_threshold : int
-        Minimum threshold when total is small.
-
-    Returns
-    -------
-    list[dict] : Filtered comments.
-    """
-    total_comments = len(comments)
-    min_count_for_ratio = int(1 / threshold_ratio) if threshold_ratio > 0 else 100
-
-    if total_comments >= min_count_for_ratio:
-        threshold = int(total_comments * threshold_ratio)
-    else:
-        threshold = min_threshold
-
-    author_comment_count = {}
-    filtered_comments = []
-
-    for comment in comments:
-        author = comment.get("author") or comment.get("Userid", "unknown")
-        author_comment_count[author] = author_comment_count.get(author, 0) + 1
-
-        if author_comment_count[author] <= threshold:
-            filtered_comments.append(comment)
-
-    return filtered_comments
-
-
-# ---------------------------------------------------------------------------
-# Log-weighted word frequency (from 留言處理(取log) cell 4)
-# ---------------------------------------------------------------------------
-
-def log_weight(word_count):
-    """Compute log-weighted value for a word count.
-
-    Uses log(word_count + 1) to avoid log(0).
-
-    Parameters
-    ----------
-    word_count : int
-        Number of times a word appears.
-
-    Returns
-    -------
-    float : Log-weighted value.
-    """
-    return math.log(word_count + 1)

@@ -52,7 +52,7 @@ def aggregate_daily_sentiment(push_data, sentiment_dict, date_col='ipdatetime'):
     -------
     pd.DataFrame : Columns ['Date', 'sentiment_mean', 'sentiment_count'].
     """
-    from text_processing_v2 import segment_with_jieba_v2, load_stopwords, filter_tokens
+    from text_processing import segment_with_jieba, load_stopwords, filter_tokens
     import re
 
     stopwords = load_stopwords()
@@ -69,7 +69,7 @@ def aggregate_daily_sentiment(push_data, sentiment_dict, date_col='ipdatetime'):
         if not date_match:
             continue
 
-        words = list(segment_with_jieba_v2([content])[0])
+        words = list(segment_with_jieba([content])[0])
         words = filter_tokens(words, stopwords)
         scores = [sentiment_dict[w] for w in words if w in sentiment_dict]
         if not scores:
@@ -279,7 +279,7 @@ def main():
                         help="Path to total_table.csv")
     parser.add_argument("--sentiment-csv", type=str, default=None,
                         help="Path to new sentiment CSV to add as column")
-    parser.add_argument("--sentiment-name", type=str, default="SENT_v2",
+    parser.add_argument("--sentiment-name", type=str, default="SENT",
                         help="Name for the new sentiment column")
     args = parser.parse_args()
 

@@ -1,29 +1,24 @@
-"""Sentiment analysis module — extracted from FinalSentimentScore.ipynb and PttStock_v2.ipynb.
+"""Sentiment analysis module.
 
-Provides:
-- Sentiment dictionary loading and merging
-- Word2Vec training pipeline
-- PCA dimensionality reduction
-- Minkowski distance-weighted sentiment propagation
-- CKIPTagger-based sentiment scoring
+Approach:
+1. Skip-gram Word2Vec (sg=1) with vector_size=150, min_count=5
+2. No PCA dimensionality reduction — uses raw W2V vectors
+3. Cosine distance k-NN propagation (k=20) with confidence-weighted IDW
+4. Confidence weighting: log(1+freq)/log(1+max_freq) per word
+5. Batch processing for memory efficiency
+6. np.argpartition for O(M) top-k selection
 """
 
 import numpy as np
 import pandas as pd
-from collections import Counter
-from itertools import chain
-from multiprocessing import Pool
-
-from scipy.spatial.distance import cdist
-from sklearn.decomposition import PCA
 from gensim.models import Word2Vec
 
-from config import OPINION_DICT_PATH, NO_SCORE_DICT_PATH
+from config import OPINION_DICT_PATH
 from column_map import SENTIMENT_COLUMNS
 
 
 # ---------------------------------------------------------------------------
-# Dictionary functions
+# Opinion dictionary loading
 # ---------------------------------------------------------------------------
 
 def load_opinion_dictionary(path=None):
@@ -45,59 +40,37 @@ def load_opinion_dictionary(path=None):
     return df
 
 
-def load_computed_dictionary(path=None):
-    """Load the computed sentiment dictionary CSV.
-
-    Parameters
-    ----------
-    path : str or Path, optional
-        Path to computed_sentiment_dict.csv. Defaults to config.NO_SCORE_DICT_PATH.
-
-    Returns
-    -------
-    pd.DataFrame : Columns ['word', 'sentiment_score'].
-    """
-    if path is None:
-        path = NO_SCORE_DICT_PATH
-    df = pd.read_csv(path)
-    df.rename(columns=SENTIMENT_COLUMNS, inplace=True)
-    return df
-
-
-def merge_dictionaries(opinion_df, computed_df):
-    """Combine original opinion dictionary with computed sentiment scores.
-
-    Parameters
-    ----------
-    opinion_df : pd.DataFrame
-        Original opinion dictionary.
-    computed_df : pd.DataFrame
-        Computed dictionary for previously-unscored words.
-
-    Returns
-    -------
-    pd.DataFrame : Merged dictionary with columns ['word', 'sentiment_score'].
-    """
-    return pd.concat([computed_df, opinion_df], ignore_index=True)
-
-
 # ---------------------------------------------------------------------------
-# Word2Vec pipeline (from FinalSentimentScore cells 16-19)
+# Word2Vec — skip-gram, higher dim, min_count filtering
 # ---------------------------------------------------------------------------
 
-def train_word2vec(sentences, vector_size=50, window=5, min_count=1, workers=4):
-    """Train a Word2Vec model on segmented sentences.
+def train_word2vec(sentences, vector_size=150, window=5, min_count=5,
+                      sg=1, epochs=10, negative=10, workers=4):
+    """Train an improved Word2Vec model.
+
+    Changes from v1:
+    - sg=1 (skip-gram) captures rare-word semantics better than CBOW
+    - vector_size=150 retains more structure (no PCA needed)
+    - min_count=5 filters noise tokens that appear < 5 times
+    - epochs=10 for better convergence (gensim default is 5)
+    - negative=10 for better negative sampling
 
     Parameters
     ----------
     sentences : list[list[str]]
-        Segmented sentences.
+        Segmented sentences (list of token lists).
     vector_size : int
         Dimensionality of word vectors.
     window : int
         Context window size.
     min_count : int
-        Minimum word frequency.
+        Ignore words with total frequency lower than this.
+    sg : int
+        1 for skip-gram, 0 for CBOW.
+    epochs : int
+        Number of training epochs.
+    negative : int
+        Number of negative samples.
     workers : int
         Number of training threads.
 
@@ -110,35 +83,23 @@ def train_word2vec(sentences, vector_size=50, window=5, min_count=1, workers=4):
         vector_size=vector_size,
         window=window,
         min_count=min_count,
+        sg=sg,
+        epochs=epochs,
+        negative=negative,
         workers=workers,
     )
     return model
 
 
-def reduce_dimensions(vectors, n_components=4):
-    """Reduce word vectors to lower dimensions using PCA.
-
-    Parameters
-    ----------
-    vectors : np.ndarray
-        Word vectors of shape (n_words, vector_size).
-    n_components : int
-        Target dimensionality.
-
-    Returns
-    -------
-    np.ndarray : Reduced vectors of shape (n_words, n_components).
-    """
-    pca = PCA(n_components=n_components)
-    return pca.fit_transform(vectors)
-
-
 # ---------------------------------------------------------------------------
-# Sentiment score mapping (from FinalSentimentScore cells 20-21)
+# Sentiment score mapping v2 — with confidence column
 # ---------------------------------------------------------------------------
 
-def map_sentiment_scores(vocab, opinion_dict):
-    """Map existing sentiment scores to vocabulary, 0 for unknown words.
+def map_sentiment_scores(vocab, opinion_dict, word_freq=None):
+    """Map sentiment scores to vocabulary with confidence weighting.
+
+    Adds a 'confidence' column: log(1+freq) / log(1+max_freq).
+    Words not in the opinion dictionary get sentiment_score=0.
 
     Parameters
     ----------
@@ -146,197 +107,221 @@ def map_sentiment_scores(vocab, opinion_dict):
         Word2Vec vocabulary (ordered).
     opinion_dict : pd.DataFrame
         DataFrame with columns ['word', 'sentiment_score'].
+    word_freq : dict, optional
+        {word: count}. If provided, computes confidence column.
 
     Returns
     -------
-    pd.DataFrame : DataFrame with columns ['word', 'sentiment_score'].
+    pd.DataFrame : Columns ['word', 'sentiment_score', 'confidence'].
     """
     emotion_map = opinion_dict.set_index('word')['sentiment_score'].to_dict()
     df = pd.DataFrame({'word': vocab})
     df['sentiment_score'] = df['word'].map(emotion_map).fillna(0)
+
+    if word_freq is not None:
+        max_freq = max(word_freq.values()) if word_freq else 1
+        log_max = np.log(1 + max_freq)
+        df['confidence'] = df['word'].map(
+            lambda w: np.log(1 + word_freq.get(w, 0)) / log_max
+        )
+    else:
+        df['confidence'] = 1.0
+
     return df
 
 
-def split_scored_unscored(merged_df, vectors_reduced):
-    """Split into scored and unscored DataFrames with PCA coordinates.
+# ---------------------------------------------------------------------------
+# Split scored / unscored v2 — raw vectors, no PCA
+# ---------------------------------------------------------------------------
+
+def split_scored_unscored(merged_df, vectors):
+    """Split into scored and unscored, attaching raw W2V vectors.
+
+    Unlike v1, does NOT apply PCA. Returns the full-dimensional vectors.
 
     Parameters
     ----------
     merged_df : pd.DataFrame
-        DataFrame with ['word', 'sentiment_score'].
-    vectors_reduced : np.ndarray
-        PCA-reduced vectors, same length as merged_df.
+        DataFrame with ['word', 'sentiment_score', 'confidence'].
+    vectors : np.ndarray
+        W2V vectors, shape (len(merged_df), vector_size).
 
     Returns
     -------
-    tuple : (df_with_score_zero, df_without_score_zero)
-        Both DataFrames have columns ['word', 'sentiment_score', 'X', 'Y', 'Z', 'A'].
+    tuple : (df_unscored, df_scored, vecs_unscored, vecs_scored)
+        df_unscored/df_scored: DataFrames with word, sentiment_score, confidence.
+        vecs_unscored/vecs_scored: np.ndarray of shape (N, vector_size).
     """
-    coord_cols = ['X', 'Y', 'Z', 'A']
-    vr = pd.DataFrame(vectors_reduced, columns=coord_cols)
-    full_df = pd.concat([merged_df, vr], axis=1)
+    mask_scored = merged_df['sentiment_score'] != 0.0
 
-    df_scored_zero = full_df[full_df['sentiment_score'] == 0.0].reset_index(drop=True)
-    df_not_zero = full_df[full_df['sentiment_score'] != 0.0].reset_index(drop=True)
+    df_unscored = merged_df[~mask_scored].reset_index(drop=True)
+    df_scored = merged_df[mask_scored].reset_index(drop=True)
 
-    return df_scored_zero, df_not_zero
+    vecs_unscored = vectors[~mask_scored.values]
+    vecs_scored = vectors[mask_scored.values]
+
+    return df_unscored, df_scored, vecs_unscored, vecs_scored
 
 
 # ---------------------------------------------------------------------------
-# Distance-based sentiment propagation (from FinalSentimentScore cells 23-29)
+# k-NN cosine sentiment propagation
 # ---------------------------------------------------------------------------
 
-# Module-level variables used by multiprocessing workers
-_points2_global = None
-_value_global = None
-
-
-def _init_distance_worker(points2):
-    """Initializer for distance calculation pool workers."""
-    global _points2_global
-    _points2_global = points2
-
-
-def _calculate_distance_chunk(chunk):
-    """Calculate sum of inverse Minkowski distances for a chunk of points."""
-    distances = []
-    for point1 in chunk:
-        distance_row = 1 / cdist([point1], _points2_global, metric='minkowski', p=4)
-        distances.append(np.sum(distance_row))
-    return distances
-
-
-def calculate_distances(unscored_coords, scored_coords, p=4, n_chunks=10):
-    """Calculate parallel Minkowski distance sums from unscored to scored points.
-
-    For each unscored point, computes the sum of 1/d(p, q) for all scored points q,
-    where d is the Minkowski distance with parameter p.
+def _cosine_similarity_batch(query_vecs, ref_vecs):
+    """Compute cosine similarity matrix between query and reference vectors.
 
     Parameters
     ----------
-    unscored_coords : np.ndarray
-        Coordinates of unscored words, shape (N, D).
-    scored_coords : np.ndarray
-        Coordinates of scored words, shape (M, D).
-    p : int
-        Minkowski distance parameter.
-    n_chunks : int
-        Number of chunks for parallel processing.
+    query_vecs : np.ndarray, shape (Q, D)
+    ref_vecs : np.ndarray, shape (R, D)
 
     Returns
     -------
-    np.ndarray : Distance sums for each unscored word, shape (N,).
+    np.ndarray : shape (Q, R), cosine similarities.
     """
-    chunks = np.array_split(unscored_coords, n_chunks)
-
-    with Pool(initializer=_init_distance_worker, initargs=(scored_coords,)) as pool:
-        results = pool.map(_calculate_distance_chunk, chunks)
-
-    return np.concatenate(results)
+    # Normalize to unit vectors
+    query_norm = query_vecs / (np.linalg.norm(query_vecs, axis=1, keepdims=True) + 1e-10)
+    ref_norm = ref_vecs / (np.linalg.norm(ref_vecs, axis=1, keepdims=True) + 1e-10)
+    return query_norm @ ref_norm.T
 
 
-def _init_weighted_worker(points2, value):
-    """Initializer for weighted distance calculation pool workers."""
-    global _points2_global, _value_global
-    _points2_global = points2
-    _value_global = value
+def propagate_sentiment_knn(vecs_unscored, vecs_scored, scores_scored,
+                            confidence_scored=None, k=20, batch_size=5000):
+    """Propagate sentiment via k-nearest-neighbor cosine-weighted interpolation.
 
+    For each unscored word u:
+        score(u) = sum(sim_i * conf_i * score_i) / sum(sim_i * conf_i)
+    where i ranges over the k nearest scored words by cosine similarity,
+    and conf_i is the confidence weight of scored word i.
 
-def _calculate_weighted_distance_chunk(chunk):
-    """Calculate weighted distance sums for a chunk of points."""
-    weighted_distances = []
-    for point1 in chunk:
-        inv_distances = 1 / cdist([point1], _points2_global, metric='minkowski', p=4).flatten()
-        weighted_distance = np.dot(inv_distances, _value_global)
-        weighted_distances.append(weighted_distance)
-    return weighted_distances
-
-
-def calculate_weighted_distances(unscored_coords, scored_coords, scores, p=4, n_chunks=5):
-    """Calculate parallel weighted distance sums (score * 1/distance).
+    Uses np.argpartition for efficient O(M) top-k selection per query.
 
     Parameters
     ----------
-    unscored_coords : np.ndarray
-        Coordinates of unscored words, shape (N, D).
-    scored_coords : np.ndarray
-        Coordinates of scored words, shape (M, D).
-    scores : np.ndarray
-        Sentiment scores for scored words, shape (M,).
-    p : int
-        Minkowski distance parameter.
-    n_chunks : int
-        Number of chunks for parallel processing.
+    vecs_unscored : np.ndarray, shape (N, D)
+        Vectors of unscored words.
+    vecs_scored : np.ndarray, shape (M, D)
+        Vectors of scored words.
+    scores_scored : np.ndarray, shape (M,)
+        Sentiment scores of scored words.
+    confidence_scored : np.ndarray, shape (M,), optional
+        Confidence weights for scored words. Defaults to all 1.0.
+    k : int
+        Number of nearest neighbors.
+    batch_size : int
+        Process this many unscored words per batch to limit memory.
 
     Returns
     -------
-    np.ndarray : Weighted distance sums for each unscored word, shape (N,).
+    np.ndarray : shape (N,), propagated sentiment scores.
     """
-    chunks = np.array_split(unscored_coords, n_chunks)
+    N = vecs_unscored.shape[0]
+    M = vecs_scored.shape[0]
+    k = min(k, M)  # Can't have more neighbors than scored words
 
-    with Pool(initializer=_init_weighted_worker, initargs=(scored_coords, scores)) as pool:
-        results = pool.map(_calculate_weighted_distance_chunk, chunks)
+    if confidence_scored is None:
+        confidence_scored = np.ones(M, dtype=np.float64)
 
-    return np.concatenate(results)
+    # Pre-weight: score * confidence for each scored word
+    weighted_scores = scores_scored * confidence_scored
 
+    # Normalize reference vectors once
+    ref_norms = np.linalg.norm(vecs_scored, axis=1, keepdims=True) + 1e-10
+    ref_normalized = vecs_scored / ref_norms
 
-def compute_final_sentiment(weighted_distances, distances):
-    """Compute final sentiment scores by dividing weighted distances by distances.
+    result = np.zeros(N, dtype=np.float64)
 
-    Parameters
-    ----------
-    weighted_distances : np.ndarray
-        Weighted distance sums, shape (N,).
-    distances : np.ndarray
-        Distance sums, shape (N,).
+    n_batches = (N + batch_size - 1) // batch_size
+    for b in range(n_batches):
+        start = b * batch_size
+        end = min(start + batch_size, N)
+        batch_vecs = vecs_unscored[start:end]
 
-    Returns
-    -------
-    np.ndarray : Final sentiment scores, shape (N,).
-    """
-    return np.divide(weighted_distances, distances)
+        # Cosine similarity: (batch, M)
+        query_norms = np.linalg.norm(batch_vecs, axis=1, keepdims=True) + 1e-10
+        query_normalized = batch_vecs / query_norms
+        sim_matrix = query_normalized @ ref_normalized.T  # (batch, M)
+
+        # For each query, find top-k by argpartition (O(M) per query)
+        # argpartition puts the k largest at the end (negated = smallest = largest sim)
+        top_k_indices = np.argpartition(-sim_matrix, k, axis=1)[:, :k]  # (batch, k)
+
+        # Gather similarities and compute weighted average
+        batch_n = end - start
+        for i in range(batch_n):
+            idx = top_k_indices[i]
+            sims = sim_matrix[i, idx]
+
+            # Clamp negative similarities to 0 (dissimilar words shouldn't contribute)
+            sims = np.maximum(sims, 0.0)
+
+            weights = sims * confidence_scored[idx]
+            weight_sum = weights.sum()
+
+            if weight_sum > 0:
+                result[start + i] = (sims * weighted_scores[idx]).sum() / weight_sum
+            else:
+                result[start + i] = 0.0
+
+        if (b + 1) % 10 == 0 or (b + 1) == n_batches:
+            print(f"    Batch {b+1}/{n_batches} done ({end}/{N} words)")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
-# CKIPTagger-based sentiment (from PttStock_v2 cell 25)
+# Convenience: full propagation pipeline
 # ---------------------------------------------------------------------------
 
-def calculate_push_sentiment_ckip(pushes, ws, opinion_pos, opinion_neg):
-    """Calculate positive and negative sentiment from pushes using CKIPTagger.
+def build_sentiment_dictionary(model, opinion_dict, word_freq=None,
+                                  k=20, batch_size=5000):
+    """Full pipeline: map scores, split, propagate, merge.
 
     Parameters
     ----------
-    pushes : list[dict]
-        Push dictionaries with 'Content' key.
-    ws : ckiptagger.WS
-        CKIPTagger word segmentation model.
-    opinion_pos : pd.DataFrame
-        Positive opinion dictionary with ['word', 'sentiment_score'].
-    opinion_neg : pd.DataFrame
-        Negative opinion dictionary with ['word', 'sentiment_score'].
+    model : Word2Vec
+        Trained gensim Word2Vec model.
+    opinion_dict : pd.DataFrame
+        Opinion dictionary with ['word', 'sentiment_score'].
+    word_freq : dict, optional
+        {word: count} for confidence weighting.
+    k : int
+        Number of nearest neighbors.
+    batch_size : int
+        Batch size for k-NN propagation.
 
     Returns
     -------
-    tuple : (positive_score, negative_score, total_score)
+    pd.DataFrame : Complete dictionary with ['word', 'sentiment_score'].
+    pd.DataFrame : Computed (previously unscored) subset.
     """
-    contents_only = [d.get("Content", "N/A") for d in pushes]
+    vocab = model.wv.index_to_key
+    vectors = model.wv[vocab]
 
-    word_sentence_list = ws(
-        contents_only,
-        sentence_segmentation=True,
-        segment_delimiter_set={",", "。", ":", "?", "!", ";"},
+    print("  Mapping sentiment scores...")
+    mapped_df = map_sentiment_scores(vocab, opinion_dict, word_freq)
+
+    print("  Splitting scored / unscored...")
+    df_unscored, df_scored, vecs_unscored, vecs_scored = \
+        split_scored_unscored(mapped_df, vectors)
+
+    scored_values = df_scored['sentiment_score'].to_numpy()
+    confidence_values = df_scored['confidence'].to_numpy()
+
+    print(f"  Scored words: {len(df_scored)}, Unscored words: {len(df_unscored)}")
+    print(f"  Propagating sentiment (k={k}, batches of {batch_size})...")
+
+    propagated = propagate_sentiment_knn(
+        vecs_unscored, vecs_scored, scored_values,
+        confidence_scored=confidence_values,
+        k=k, batch_size=batch_size,
     )
-    one_dimensional_wordlist = list(chain(*word_sentence_list))
+    df_unscored = df_unscored.copy()
+    df_unscored['sentiment_score'] = propagated
 
-    positive_grades = 0
-    for _, row in opinion_pos.iterrows():
-        if row['word'] in one_dimensional_wordlist:
-            positive_grades += row['sentiment_score']
+    # Merge: computed + original opinion dict
+    computed = df_unscored[['word', 'sentiment_score']]
+    total = pd.concat([computed, opinion_dict[['word', 'sentiment_score']]],
+                      ignore_index=True)
 
-    negative_grades = 0
-    for _, row in opinion_neg.iterrows():
-        if row['word'] in one_dimensional_wordlist:
-            negative_grades += row['sentiment_score']
-
-    total = positive_grades + negative_grades
-    return positive_grades, negative_grades, total
+    return total, computed
