@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Large binary / generated files
+*.npy
+
+# Large serialized data files (raw PTT scrapes)
+data/comments/raw/
+
+# Large intermediate outputs
+output/segmented_sentences.json
+output/v2/segmented_sentences_v2.json
+
+# NLP models (2.5GB CKIPTagger)
+data/nlp_models/
+
+# Raw financial data (large Excel archives)
+data/financial/excel_raw/
+data/financial/fama-french/
+data/financial/prediction_features/
+
+# External datasets (download separately)
+data/external/
+
+# Archive (old unused files)
+archive/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code local settings
+.claude/
+
+# Environment
+.env
+.venv/
+venv/

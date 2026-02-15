@@ -1,0 +1,102 @@
+# Custom jieba dictionary for PTT Stock Board
+# Format: word frequency part-of-speech
+# Higher frequency forces jieba to keep compound terms intact
+
+# === Stock market terms ===
+台積電 100 n
+聯發科 100 n
+鴻海 100 n
+大立光 100 n
+台達電 100 n
+中華電 100 n
+國巨 100 n
+聯電 100 n
+日月光 100 n
+富邦金 100 n
+國泰金 100 n
+中信金 100 n
+玉山金 100 n
+元大金 100 n
+兆豐金 100 n
+第一金 100 n
+華南金 100 n
+合庫金 100 n
+開發金 100 n
+台新金 100 n
+永豐金 100 n
+長榮 100 n
+陽明 100 n
+萬海 100 n
+友達 100 n
+群創 100 n
+
+# === Market action terms ===
+多頭 80 n
+空頭 80 n
+做多 80 v
+做空 80 v
+放空 80 v
+融資 80 n
+融券 80 n
+主力 80 n
+散戶 80 n
+法人 80 n
+外資 80 n
+投信 80 n
+自營商 80 n
+籌碼 80 n
+當沖 80 n
+現股當沖 80 n
+漲停 80 n
+跌停 80 n
+平盤 80 n
+開盤 80 n
+收盤 80 n
+盤中 80 n
+盤後 80 n
+盤整 80 n
+量縮 80 n
+爆量 80 n
+量能 80 n
+成交量 80 n
+殖利率 80 n
+除息 80 n
+除權 80 n
+除權息 80 n
+填息 80 n
+貼息 80 n
+本益比 80 n
+淨值比 80 n
+毛利率 80 n
+營收 80 n
+財報 80 n
+月營收 80 n
+季報 80 n
+年報 80 n
+
+# === PTT stock board specific ===
+航運股 80 n
+金融股 80 n
+電子股 80 n
+傳產股 80 n
+高股息 80 n
+存股 80 n
+定存股 80 n
+景氣循環 80 n
+護國神山 80 n
+畢業文 80 n
+抄底 80 v
+套牢 80 v
+停損 80 v
+停利 80 v
+加碼 80 v
+減碼 80 v
+攤平 80 v
+凹單 80 v
+槓桿 80 n
+權證 80 n
+選擇權 80 n
+期貨 80 n
+台指期 80 n
+正二 80 n
+反一 80 n
