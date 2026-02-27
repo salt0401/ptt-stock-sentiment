@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -159,7 +160,17 @@ def run_regression_comparison(total_table_df, sentiment_series,
     """
     # Drop rows with missing data
     df = total_table_df[FF5_COLS + [RETURN_COL]].copy()
+    
+    # Sort chronological just in case
+    df.index = total_table_df.index
+    if 'Date' in total_table_df.columns:
+        df['Date'] = total_table_df['Date']
+        df.sort_values('Date', inplace=True)
+    
+    # Create lag variable
     df[sentiment_name] = sentiment_series.values
+    df[f'{sentiment_name}_lag1'] = df[sentiment_name].shift(1)
+    
     df = df.dropna()
 
     y = df[RETURN_COL]
@@ -168,9 +179,17 @@ def run_regression_comparison(total_table_df, sentiment_series,
     X_base = df[FF5_COLS]
     res_base = run_ols(y, X_base, cov_type=cov_type)
 
-    # Augmented: FF5 + sentiment
-    X_aug = df[FF5_COLS + [sentiment_name]]
+    # Augmented: FF5 + sentiment (lagged)
+    augmented_features = FF5_COLS + [f'{sentiment_name}_lag1']
+    X_aug = df[augmented_features]
     res_aug = run_ols(y, X_aug, cov_type=cov_type)
+
+    # VIF Calculation for Augmented Model
+    vif_data = pd.DataFrame()
+    X_aug_vif = sm.add_constant(X_aug) # Need constant for standard VIF
+    vif_data["feature"] = X_aug_vif.columns
+    vif_data["VIF"] = [variance_inflation_factor(X_aug_vif.values, i) for i in range(len(X_aug_vif.columns))]
+    vif_dict = vif_data.set_index('feature')['VIF'].to_dict()
 
     results = {
         'n_obs': int(len(df)),
@@ -185,14 +204,16 @@ def run_regression_comparison(total_table_df, sentiment_series,
         'aug_aic': res_aug.aic,
         'aug_bic': res_aug.bic,
         # Sentiment coefficient
-        'sent_coef': res_aug.params.get(sentiment_name, np.nan),
-        'sent_tstat': res_aug.tvalues.get(sentiment_name, np.nan),
-        'sent_pvalue': res_aug.pvalues.get(sentiment_name, np.nan),
+        'sent_coef': res_aug.params.get(f'{sentiment_name}_lag1', np.nan),
+        'sent_tstat': res_aug.tvalues.get(f'{sentiment_name}_lag1', np.nan),
+        'sent_pvalue': res_aug.pvalues.get(f'{sentiment_name}_lag1', np.nan),
         # Delta
         'delta_r2': res_aug.rsquared - res_base.rsquared,
         'delta_adj_r2': res_aug.rsquared_adj - res_base.rsquared_adj,
         'delta_aic': res_aug.aic - res_base.aic,
         'delta_bic': res_aug.bic - res_base.bic,
+        # VIF
+        'vif_dict': vif_dict,
     }
 
     if verbose:
@@ -202,11 +223,17 @@ def run_regression_comparison(total_table_df, sentiment_series,
         print(f"  {'Adj R-squared':<20} {results['base_adj_r2']:>12.6f} {results['aug_adj_r2']:>12.6f} {results['delta_adj_r2']:>+12.6f}")
         print(f"  {'AIC':<20} {results['base_aic']:>12.2f} {results['aug_aic']:>12.2f} {results['delta_aic']:>+12.2f}")
         print(f"  {'BIC':<20} {results['base_bic']:>12.2f} {results['aug_bic']:>12.2f} {results['delta_bic']:>+12.2f}")
-        print(f"\n  {sentiment_name} coefficient: {results['sent_coef']:.6f}")
-        print(f"  {sentiment_name} t-stat:      {results['sent_tstat']:.4f}")
-        print(f"  {sentiment_name} p-value:     {results['sent_pvalue']:.4e}")
+        print(f"\n  {sentiment_name}_lag1 coefficient: {results['sent_coef']:.6f}")
+        print(f"  {sentiment_name}_lag1 t-stat:      {results['sent_tstat']:.4f}")
+        print(f"  {sentiment_name}_lag1 p-value:     {results['sent_pvalue']:.4e}")
         sig = '***' if results['sent_pvalue'] < 0.01 else '**' if results['sent_pvalue'] < 0.05 else '*' if results['sent_pvalue'] < 0.1 else ''
-        print(f"  Significance:      {sig}")
+        print(f"  Significance:           {sig}")
+        
+        print(f"\n  Variance Inflation Factors (VIF):")
+        for feat, vf in results['vif_dict'].items():
+            if feat != 'const':
+                print(f"    {feat:<15} {vf:.4f}")
+
         print(f"\n  N observations: {results['n_obs']}")
         nw_lag = _nw_lag(results['n_obs'])
         print(f"  HAC lags (Newey-West): {nw_lag}")

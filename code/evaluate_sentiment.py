@@ -115,16 +115,16 @@ TAG_MAP = {'推': 1, '噓': -1, '→': 0}
 TAG_NAMES = {1: 'push', -1: 'boo', 0: 'arrow'}
 
 
-def evaluate_dictionary(push_data, dict_df, threshold=0.0, stopwords=None,
-                        verbose=True):
-    """Evaluate a sentiment dictionary against push-tag ground truth.
+def evaluate_dictionary(push_data, dict_df=None, threshold=0.0, stopwords=None,
+                        verbose=True, use_finbert=False):
+    """Evaluate a sentiment dictionary or model against push-tag ground truth.
 
     Parameters
     ----------
     push_data : list[dict]
         Push data with 'tag' and 'content' keys.
-    dict_df : pd.DataFrame
-        Sentiment dictionary with ['word', 'sentiment_score'].
+    dict_df : pd.DataFrame, optional
+        Sentiment dictionary with ['word', 'sentiment_score']. Required unless use_finbert=True.
     threshold : float
         Score threshold for positive/negative classification.
         score > threshold -> positive, score < -threshold -> negative, else neutral.
@@ -132,39 +132,91 @@ def evaluate_dictionary(push_data, dict_df, threshold=0.0, stopwords=None,
         Stopwords for filtering.
     verbose : bool
         Print detailed results.
+    use_finbert : bool
+        If True, ignores dict_df and uses FinBERT to score raw, unsegmented strings.
 
     Returns
     -------
     dict : Evaluation metrics.
     """
-    sentiment_dict = dict_df.set_index('word')['sentiment_score'].to_dict()
+    if not use_finbert:
+        if dict_df is None:
+            raise ValueError("dict_df is required when use_finbert=False")
+        sentiment_dict = dict_df.set_index('word')['sentiment_score'].to_dict()
+    
+    # Optional FinBERT initialization
+    scorer = None
+    if use_finbert:
+        from finbert_scorer import FinBERTScorer
+        print("  Initializing FinBERT model...")
+        scorer = FinBERTScorer()
 
-    # Score each comment
     records = []
-    for item in push_data:
-        tag_str = item['tag']
-        if tag_str not in TAG_MAP:
-            continue
-        true_label = TAG_MAP[tag_str]
-
-        words = list(segment_with_jieba([item['content']])[0])
-        score = score_comment(words, sentiment_dict, stopwords)
-        if score is None:
-            continue
-
-        # Predicted class based on threshold
-        if score > threshold:
-            pred_label = 1
-        elif score < -threshold:
-            pred_label = -1
-        else:
-            pred_label = 0
-
-        records.append({
-            'true_label': true_label,
-            'pred_label': pred_label,
-            'score': score,
-        })
+    
+    if use_finbert:
+        # Batch collect sentences
+        texts_to_score = []
+        valid_items = []
+        for item in push_data:
+            tag_str = item['tag']
+            if tag_str not in TAG_MAP:
+                continue
+            
+            # Very short comments (e.g., just "1") might not have sentiment, but let model decide
+            content = item['content'].strip()
+            if not content:
+                continue
+                
+            texts_to_score.append(content)
+            valid_items.append((TAG_MAP[tag_str], content))
+            
+        if not texts_to_score:
+            print("  [WARN] No scoreable comments found.")
+            return {}
+            
+        scores_array = scorer.score_sentences(texts_to_score, verbose=verbose)
+        
+        for i, (true_label, _) in enumerate(valid_items):
+            score = scores_array[i]
+            if score > threshold:
+                pred_label = 1
+            elif score < -threshold:
+                pred_label = -1
+            else:
+                pred_label = 0
+                
+            records.append({
+                'true_label': true_label,
+                'pred_label': pred_label,
+                'score': score,
+            })
+            
+    else:
+        # Score each comment via dictionary
+        for item in push_data:
+            tag_str = item['tag']
+            if tag_str not in TAG_MAP:
+                continue
+            true_label = TAG_MAP[tag_str]
+    
+            words = list(segment_with_jieba([item['content']])[0])
+            score = score_comment(words, sentiment_dict, stopwords)
+            if score is None:
+                continue
+    
+            # Predicted class based on threshold
+            if score > threshold:
+                pred_label = 1
+            elif score < -threshold:
+                pred_label = -1
+            else:
+                pred_label = 0
+    
+            records.append({
+                'true_label': true_label,
+                'pred_label': pred_label,
+                'score': score,
+            })
 
     if not records:
         print("  [WARN] No scoreable comments found.")
@@ -253,19 +305,20 @@ def evaluate_dictionary(push_data, dict_df, threshold=0.0, stopwords=None,
 # Threshold grid search
 # ---------------------------------------------------------------------------
 
-def find_best_threshold(push_data, dict_df, stopwords=None,
-                        thresholds=None, metric='f1_3class_macro'):
+def find_best_threshold(push_data, dict_df=None, stopwords=None,
+                        thresholds=None, metric='f1_3class_macro', use_finbert=False):
     """Grid search for the best classification threshold.
 
     Parameters
     ----------
     push_data : list[dict]
-    dict_df : pd.DataFrame
+    dict_df : pd.DataFrame, optional
     stopwords : set, optional
     thresholds : list[float], optional
         Defaults to [-0.1, -0.05, 0, 0.05, 0.1].
     metric : str
         Metric to optimize.
+    use_finbert : bool
 
     Returns
     -------
@@ -281,7 +334,7 @@ def find_best_threshold(push_data, dict_df, stopwords=None,
     for t in thresholds:
         print(f"\n  --- Threshold = {t} ---")
         res = evaluate_dictionary(push_data, dict_df, threshold=t,
-                                  stopwords=stopwords, verbose=False)
+                                  stopwords=stopwords, verbose=False, use_finbert=use_finbert)
         score = res.get(metric, 0.0)
         all_results[t] = res
         print(f"    {metric}: {score:.4f}")
@@ -303,7 +356,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate sentiment dictionary via push tags.")
-    parser.add_argument("--dict-csv", type=str, required=True,
+    parser.add_argument("--dict-csv", type=str, default=None,
                         help="Path to sentiment dictionary CSV (word, sentiment_score)")
     parser.add_argument("--pkl", type=str, default=None,
                         help="Path to .pkl file (default: after_market.pkl)")
@@ -313,6 +366,8 @@ def main():
                         help="Classification threshold")
     parser.add_argument("--grid-search", action="store_true",
                         help="Run threshold grid search")
+    parser.add_argument("--use-finbert", action="store_true",
+                        help="Use FinBERT for contextual scoring instead of dictionary")
     args = parser.parse_args()
 
     pkl_path = Path(args.pkl) if args.pkl else PICKLE_AFTER_PATH
@@ -320,22 +375,26 @@ def main():
     push_data = load_push_data(pkl_path, max_posts=args.max_posts)
     print(f"  Total pushes: {len(push_data)}")
 
-    print(f"Loading dictionary from {args.dict_csv}...")
-    dict_df = pd.read_csv(args.dict_csv)
-    if 'word' not in dict_df.columns:
-        dict_df.rename(columns={'情緒字詞': 'word', '情緒分數': 'sentiment_score'},
-                       inplace=True)
-    print(f"  Dictionary size: {len(dict_df)}")
+    dict_df = None
+    if not args.use_finbert:
+        if args.dict_csv is None:
+            parser.error("--dict-csv is required unless --use-finbert is specified")
+        print(f"Loading dictionary from {args.dict_csv}...")
+        dict_df = pd.read_csv(args.dict_csv)
+        if 'word' not in dict_df.columns:
+            dict_df.rename(columns={'情緒字詞': 'word', '情緒分數': 'sentiment_score'},
+                           inplace=True)
+        print(f"  Dictionary size: {len(dict_df)}")
 
     stopwords = load_stopwords()
 
     if args.grid_search:
         print("\nRunning threshold grid search...")
-        find_best_threshold(push_data, dict_df, stopwords=stopwords)
+        find_best_threshold(push_data, dict_df, stopwords=stopwords, use_finbert=args.use_finbert)
     else:
         print(f"\nEvaluating with threshold={args.threshold}...")
         evaluate_dictionary(push_data, dict_df, threshold=args.threshold,
-                            stopwords=stopwords)
+                            stopwords=stopwords, use_finbert=args.use_finbert)
 
 
 if __name__ == "__main__":

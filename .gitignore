@@ -12,12 +12,15 @@ build/
 
 # Large binary / generated files
 *.npy
+*.npz
+*.pkl
 
 # Large serialized data files (raw PTT scrapes)
 data/comments/raw/
 
 # Large intermediate outputs
 output/segmented_sentences.json
+output/segmented_dated_cache.json
 
 # NLP models (2.5GB CKIPTagger)
 data/nlp_models/

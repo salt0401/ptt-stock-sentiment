@@ -119,10 +119,10 @@ def map_sentiment_scores(vocab, opinion_dict, word_freq=None):
     df['sentiment_score'] = df['word'].map(emotion_map).fillna(0)
 
     if word_freq is not None:
-        max_freq = max(word_freq.values()) if word_freq else 1
-        log_max = np.log(1 + max_freq)
+        # Use simple log1p scaling instead of dividing by log(1+max_freq)
+        # to prevent high-frequency words from squashing the weights of mid-frequency words.
         df['confidence'] = df['word'].map(
-            lambda w: np.log(1 + word_freq.get(w, 0)) / log_max
+            lambda w: 1.0 + np.log1p(word_freq.get(w, 0))
         )
     else:
         df['confidence'] = 1.0

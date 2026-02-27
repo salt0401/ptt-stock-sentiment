@@ -7,7 +7,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # --- Data directories ---
 DATA_DIR = PROJECT_ROOT / "data"
-NLP_MODELS_DIR = DATA_DIR / "nlp_models"
 FINANCIAL_DIR = DATA_DIR / "financial"
 COMMENTS_DIR = DATA_DIR / "comments"
 COMMENTS_RAW_DIR = COMMENTS_DIR / "raw"
